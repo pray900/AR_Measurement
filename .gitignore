@@ -1,0 +1,24 @@
+# Unity generated
+/[Ll]ibrary/
+/[Tt]emp/
+/[Oo]bj/
+/[Bb]uild/
+/[Bb]uilds/
+/[Ll]ogs/
+/[Uu]ser[Ss]ettings/
+
+# Visual Studio / Rider
+.vs/
+.idea/
+*.csproj
+*.sln
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Build outputs
+*.apk
+*.aab
+*.ipa
+*.unitypackage
