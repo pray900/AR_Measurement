@@ -1,6 +1,6 @@
 // PlaceAnchors.cs
-// Manages two-tap measurement flow: first tap places start marker,
-// second tap places end marker, draws a line, and shows distance.
+// Full measurement manager with guide dot, haptic feedback,
+// undo/reset, and scan prompt.
 
 using System.Collections.Generic;
 using UnityEngine;
@@ -15,29 +15,86 @@ public class PlaceAnchors : MonoBehaviour
 
     [SerializeField] private ARRaycastManager raycastManager;
     [SerializeField] private ARAnchorManager anchorManager;
+    [SerializeField] private ARPlaneManager planeManager;
     [SerializeField] private GameObject markerPrefab;
-
-    // NEW: the measurement line prefab with LineRenderer + label.
     [SerializeField] private GameObject measurementLinePrefab;
+    [SerializeField] private GameObject guideDotPrefab;
+    [SerializeField] private TextMeshProUGUI scanPromptText;
 
     // ----- Internal state -----
 
     private List<ARRaycastHit> hits = new List<ARRaycastHit>();
     public List<GameObject> placedMarkers = new List<GameObject>();
-
-    // Tracks whether we're waiting for the first or second tap.
-    // Null means no start point yet — next tap is a "start."
-    // Non-null means we have a start point — next tap is an "end."
+    private List<GameObject> measurements = new List<GameObject>();
     private GameObject firstAnchor = null;
 
-    // Stores all active measurement line objects so we can
-    // manage or delete them later.
-    private List<GameObject> measurements = new List<GameObject>();
+    // The live guide dot instance — only one exists at a time.
+    private GameObject guideDotInstance;
+
+    // Tracks whether the guide dot is currently on a surface.
+    // Used to prevent placing anchors when not aimed at a plane.
+    private bool guideDotVisible = false;
+
+    void Start()
+    {
+        // Instantiate the guide dot once at startup and hide it.
+        // We reuse this single instance rather than creating and
+        // destroying one every frame — much more efficient.
+        guideDotInstance = Instantiate(guideDotPrefab);
+        guideDotInstance.SetActive(false);
+    }
 
     void Update()
     {
-        // ----- Detect tap -----
+        UpdateGuideDot();
+        UpdateScanPrompt();
+        HandleTap();
+    }
 
+    // ----- Guide dot -----
+
+    private void UpdateGuideDot()
+    {
+        // Raycast from the CENTER of the screen every frame.
+        // This is different from the tap raycast — it's a
+        // continuous preview showing where a tap would land.
+        Vector2 screenCenter = new Vector2(Screen.width / 2f, Screen.height / 2f);
+
+        if (raycastManager.Raycast(screenCenter, hits, TrackableType.PlaneWithinPolygon))
+        {
+            // Hit a plane — show the guide dot at the intersection.
+            Pose hitPose = hits[0].pose;
+            guideDotInstance.SetActive(true);
+            guideDotInstance.transform.position = hitPose.position;
+            guideDotInstance.transform.rotation = hitPose.rotation;
+            guideDotVisible = true;
+        }
+        else
+        {
+            // Not aimed at any plane — hide the guide dot.
+            guideDotInstance.SetActive(false);
+            guideDotVisible = false;
+        }
+    }
+
+    // ----- Scan prompt -----
+
+    private void UpdateScanPrompt()
+    {
+        // Show the prompt when no planes have been detected yet.
+        // planeManager.trackables contains all detected planes.
+        // Once any plane exists, hide the prompt — the user
+        // has scanned enough to start measuring.
+        if (scanPromptText != null)
+        {
+            scanPromptText.gameObject.SetActive(planeManager.trackables.count == 0);
+        }
+    }
+
+    // ----- Tap handling -----
+
+    private void HandleTap()
+    {
         var touchscreen = Touchscreen.current;
         if (touchscreen == null)
             return;
@@ -48,44 +105,43 @@ public class PlaceAnchors : MonoBehaviour
 
         Vector2 screenPosition = touch.position.ReadValue();
 
-        // ----- Raycast -----
+        // ----- Ignore taps on UI buttons -----
+        // Without this check, tapping "Undo" or "Reset" would
+        // also place an anchor behind the button.
+        if (UnityEngine.EventSystems.EventSystem.current != null &&
+            UnityEngine.EventSystems.EventSystem.current.IsPointerOverGameObject())
+            return;
+
+        // ----- Raycast from tap position -----
 
         if (!raycastManager.Raycast(screenPosition, hits, TrackableType.PlaneWithinPolygon))
-            return; // Didn't hit a plane — ignore the tap.
+            return;
 
         Pose hitPose = hits[0].pose;
-
-        // ----- Place anchor and marker -----
-
         GameObject anchorObject = CreateAnchorMarker(hitPose);
 
-        // ----- Measurement logic -----
+        // ----- Haptic feedback -----
+        // Handheld.Vibrate() triggers a short vibration on Android.
+        // It's a simple confirmation that the anchor was placed.
+        Handheld.Vibrate();
+
+        // ----- Measurement pairing -----
 
         if (firstAnchor == null)
         {
-            // This is the FIRST tap of a new measurement.
-            // Store the anchor and wait for the second tap.
             firstAnchor = anchorObject;
         }
         else
         {
-            // This is the SECOND tap — complete the measurement.
-            // Get the two world-space positions.
             Vector3 startPos = firstAnchor.transform.position;
             Vector3 endPos = anchorObject.transform.position;
-
-            // Create the measurement visualization.
             CreateMeasurement(startPos, endPos);
-
-            // Reset for the next measurement. Setting firstAnchor
-            // to null means the next tap starts a new pair.
             firstAnchor = null;
         }
     }
 
-    // Creates an anchor with a visible marker at the given pose.
-    // Extracted into a method because both the first and second
-    // tap need the same logic.
+    // ----- Anchor creation -----
+
     private GameObject CreateAnchorMarker(Pose pose)
     {
         GameObject anchorObject = new GameObject("Anchor");
@@ -93,67 +149,40 @@ public class PlaceAnchors : MonoBehaviour
         anchorObject.transform.rotation = pose.rotation;
         anchorObject.AddComponent<ARAnchor>();
 
-        GameObject marker = Instantiate(
-            markerPrefab, pose.position, pose.rotation
-        );
+        GameObject marker = Instantiate(markerPrefab, pose.position, pose.rotation);
         marker.transform.SetParent(anchorObject.transform);
 
         placedMarkers.Add(anchorObject);
         return anchorObject;
     }
 
-    // Creates a line between two points with a distance label.
+    // ----- Measurement creation -----
+
     private void CreateMeasurement(Vector3 start, Vector3 end)
     {
-        // Instantiate the measurement line prefab.
-        // Position doesn't matter — the LineRenderer uses world-space
-        // coordinates, and we'll position the label manually.
         GameObject measurement = Instantiate(measurementLinePrefab);
 
-        // ----- Set line positions -----
-
-        // The LineRenderer draws a line between world-space points.
         LineRenderer line = measurement.GetComponent<LineRenderer>();
         line.SetPosition(0, start);
         line.SetPosition(1, end);
 
-        // ----- Calculate distance -----
-
-        // Vector3.Distance computes the Euclidean distance in meters.
-        // Multiply by 100 to convert to centimeters for display.
         float distanceMeters = Vector3.Distance(start, end);
         float distanceCm = distanceMeters * 100f;
 
-        // ----- Position and update the label -----
-
-        // Find the DistanceLabel child we created in the prefab.
-        // transform.Find searches immediate children by name.
         Transform label = measurement.transform.Find("DistanceLabel");
-
-        // Place the label at the midpoint of the line.
-        // This is the average of the start and end positions.
         Vector3 midpoint = (start + end) / 2f;
+        label.position = midpoint + Vector3.up * 0.03f;
 
-        // Offset the label slightly upward (3cm) so it floats
-        // above the line rather than sitting on top of it.
-        label.position = midpoint + Vector3.up * 0.02f;
-
-        // Update the text to show the measured distance.
-        // F1 formats to one decimal place: "42.3 cm"
         TextMeshPro tmp = label.GetComponent<TextMeshPro>();
         tmp.text = distanceCm.ToString("F1") + " cm";
 
         measurements.Add(measurement);
     }
 
-    // Called every frame AFTER Update. LateUpdate is the right
-    // place for camera-facing logic because the camera's position
-    // has been finalized by then.
+    // ----- Billboarding -----
+
     void LateUpdate()
     {
-        // Make every distance label face the camera.
-        // This is called "billboarding" — the label rotates
-        // to always show its front face to the viewer.
         Camera cam = Camera.main;
         if (cam == null)
             return;
@@ -167,13 +196,69 @@ public class PlaceAnchors : MonoBehaviour
             if (label == null)
                 continue;
 
-            // LookAt points the label's forward axis (Z) at the camera.
-            // But LookAt makes the text face AWAY from the camera
-            // (the Z axis points at the target, and text faces -Z).
-            // So we look at a point OPPOSITE the camera relative to
-            // the label — this flips it to face the camera correctly.
             Vector3 awayFromCamera = label.position - cam.transform.position;
             label.rotation = Quaternion.LookRotation(awayFromCamera);
         }
+    }
+
+    // ----- Undo and Reset (called by buttons) -----
+
+    // Removes the last placed anchor. If it was the first anchor
+    // of an incomplete pair, clears the pending state. If it was
+    // the second anchor of a completed pair, also removes the
+    // measurement line.
+    public void Undo()
+    {
+        if (placedMarkers.Count == 0)
+            return;
+
+        // Remove the last anchor.
+        GameObject lastMarker = placedMarkers[placedMarkers.Count - 1];
+        placedMarkers.RemoveAt(placedMarkers.Count - 1);
+        Destroy(lastMarker);
+
+        if (firstAnchor != null)
+        {
+            // We had a pending first anchor — that's the one we
+            // just removed. Clear the pending state.
+            firstAnchor = null;
+        }
+        else if (measurements.Count > 0)
+        {
+            // We just removed the second anchor of a completed
+            // pair. Also remove its measurement line and restore
+            // the first anchor as pending.
+            GameObject lastMeasurement = measurements[measurements.Count - 1];
+            measurements.RemoveAt(measurements.Count - 1);
+            Destroy(lastMeasurement);
+
+            // The remaining last marker is now the unpaired first
+            // anchor of that measurement.
+            if (placedMarkers.Count > 0)
+            {
+                firstAnchor = placedMarkers[placedMarkers.Count - 1];
+            }
+        }
+    }
+
+    // Removes everything — all anchors, markers, and measurements.
+    // Back to a clean slate.
+    public void ResetAll()
+    {
+        foreach (GameObject marker in placedMarkers)
+        {
+            if (marker != null)
+                Destroy(marker);
+        }
+        placedMarkers.Clear();
+
+        foreach (GameObject measurement in measurements)
+        {
+            if (measurement != null)
+                Destroy(measurement);
+        }
+        measurements.Clear();
+
+        firstAnchor = null;
     }
 }
