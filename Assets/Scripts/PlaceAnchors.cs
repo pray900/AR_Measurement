@@ -663,22 +663,15 @@ public class PlaceAnchors : MonoBehaviour
     private void SaveToGallery(string filePath)
     {
 #if UNITY_ANDROID && !UNITY_EDITOR
-        // Use Android's Java API to scan the file into the
-        // media database. This is done through Unity's
-        // AndroidJavaClass bridge, which lets you call Java
-        // methods from C#.
         using (AndroidJavaClass player = new AndroidJavaClass("com.unity3d.player.UnityPlayer"))
         using (AndroidJavaObject activity = player.GetStatic<AndroidJavaObject>("currentActivity"))
-        using (AndroidJavaClass mediaScanIntent = new AndroidJavaClass("android.content.Intent"))
         using (AndroidJavaClass uri = new AndroidJavaClass("android.net.Uri"))
         {
-            // Copy to a public Pictures folder first.
             string galleryPath = "/sdcard/Pictures/ARMeasure/";
             System.IO.Directory.CreateDirectory(galleryPath);
             string destPath = galleryPath + System.IO.Path.GetFileName(filePath);
             System.IO.File.Copy(filePath, destPath, true);
 
-            // Trigger media scan.
             using (AndroidJavaObject fileUri = uri.CallStatic<AndroidJavaObject>(
                 "fromFile", new AndroidJavaObject("java.io.File", destPath)))
             {
@@ -691,6 +684,15 @@ public class PlaceAnchors : MonoBehaviour
                 }
             }
         }
+#elif UNITY_IOS && !UNITY_EDITOR
+        // iOS native screenshot saving via Unity's ScreenCapture.
+        // The file is already saved to persistentDataPath.
+        // To get it into the Photos app, we use a small native
+        // Objective-C call through Unity's plugin system.
+        // For now, the file is accessible through the Files app
+        // at persistentDataPath. Full Photos integration requires
+        // a native plugin — we'll address this if needed.
+        Debug.Log("Screenshot saved to: " + filePath);
 #endif
     }
 
